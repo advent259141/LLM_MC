@@ -7,6 +7,7 @@ from app.llm.client import llm_client
 from app.llm.prompts import get_agent_system_prompt, format_observation
 from app.script.executor import script_executor, BotAPI
 from app.skills.manager import skill_manager
+from app.task.manager import task_manager, TaskStatus
 from app.config import settings
 
 
@@ -14,6 +15,8 @@ class Agent:
     """
     Main Agent class
     Coordinates perception, decision-making, and action execution
+    
+    支持后台任务执行，LLM 决策循环不被阻塞
     """
     
     def __init__(self):
@@ -23,11 +26,11 @@ class Agent:
         self._tick_task: Optional[asyncio.Task] = None
         self._pending_chat: list = []
         
-        # 技能测试相关
-        self._current_test_task: Optional[asyncio.Task] = None
-        self._current_test_name: Optional[str] = None
-        self._test_cancelled: bool = False
-        self._skill_testing: bool = False  # 是否正在测试技能（暂停LLM）
+        # 任务管理器引用
+        self.task_manager = task_manager
+        
+        # 任务运行时的轮询计时
+        self._task_tick_counter: int = 0
     
     async def start(self):
         """Start the agent's decision loop"""
@@ -51,6 +54,9 @@ class Agent:
         
         print("[Agent] Stopping agent loop...")
         self.is_running = False
+        
+        # 取消所有后台任务
+        await self.task_manager.cancel_all_tasks()
         
         if self._tick_task:
             self._tick_task.cancel()
@@ -78,12 +84,8 @@ class Agent:
             await asyncio.sleep(settings.agent_tick_rate)
     
     async def tick(self):
-        """Single decision-action cycle"""
+        """Single decision-action cycle - 事件驱动模式"""
         if not self.is_running:
-            return
-        
-        # 如果正在测试技能，跳过LLM决策
-        if self._skill_testing:
             return
         
         # 先检查Bot是否已连接
@@ -105,28 +107,82 @@ class Agent:
                 observation["chatMessages"].extend(self._pending_chat)
                 self._pending_chat = []
             
-            # Check if there's anything interesting to respond to
+            # 2. 添加当前任务状态到观察
+            task_status = self.task_manager.get_status_summary()
+            observation["currentTasks"] = task_status
+            
+            # 3. 检查触发条件
             has_chat = bool(observation.get("chatMessages"))
             has_events = bool(observation.get("events"))
+            has_active_tasks = task_status.get("has_active_tasks", False)
             
-            # Skip if nothing interesting and we just waited
-            if (not has_chat and not has_events and 
-                self.last_action and self.last_action.get("action") == "wait"):
-                return
+            # 检查是否有紧急情况需要处理
+            health_info = observation.get("health", {})
+            is_health_critical = health_info.get("health", 20) < 6  # 生命值低于 6
+            is_food_critical = health_info.get("food", 20) < 4      # 饥饿值低于 4
+            has_urgent_situation = is_health_critical or is_food_critical
             
-            # 2. Format observation for LLM
+            # LLM 触发策略：
+            # - 空闲状态（无后台任务）：每 agent_tick_rate 秒调用一次，让 bot 可以主动行动
+            # - 有后台任务运行时：
+            #   - 有事件/聊天/紧急情况时立即调用
+            #   - 否则每 agent_task_tick_rate 秒调用一次（如果配置 > 0）
+            
+            if has_active_tasks:
+                # 有后台任务运行时
+                should_call_llm = (
+                    has_chat or               # 有聊天消息
+                    has_events or             # 有游戏事件
+                    has_urgent_situation      # 紧急情况
+                )
+                
+                if not should_call_llm:
+                    # 检查是否到了定时轮询时间
+                    task_tick_rate = settings.agent_task_tick_rate
+                    if task_tick_rate > 0:
+                        # 计算需要多少个 tick 才等于 task_tick_rate
+                        ticks_needed = int(task_tick_rate / settings.agent_tick_rate)
+                        self._task_tick_counter += 1
+                        
+                        if self._task_tick_counter >= ticks_needed:
+                            # 到达定时轮询时间，触发 LLM
+                            self._task_tick_counter = 0
+                            should_call_llm = True
+                    
+                    if not should_call_llm:
+                        # 任务运行中且未到轮询时间，跳过本次 tick
+                        return
+                else:
+                    # 有事件触发，重置计数器
+                    self._task_tick_counter = 0
+            else:
+                # 空闲状态：重置任务计数器
+                self._task_tick_counter = 0
+                
+                # 保持每 tick_rate 秒调用一次
+                # 但如果上次是 wait 且没有新事件，可以跳过
+                if (not has_chat and not has_events and
+                    self.last_action and self.last_action.get("action") == "wait"):
+                    return
+            
+            # 3. Format observation for LLM
             user_message = format_observation(observation)
             
-            if self.last_action_result:
-                user_message += f"\nLast action result: {self.last_action_result}"
+            # 添加任务状态信息
+            if has_active_tasks:
+                user_message += f"\n\n=== 当前后台任务 ===\n{task_status['summary']}"
             
-            # 3. Get decision from LLM
+            if self.last_action_result:
+                user_message += f"\n\nLast action result: {self.last_action_result}"
+            
+            # 4. Get decision from LLM
             print("[Agent] Thinking...")
             
             system_prompt = get_agent_system_prompt({
                 "position": observation.get("position"),
                 "health": observation.get("health"),
-                "time": observation.get("time")
+                "time": observation.get("time"),
+                "has_active_tasks": has_active_tasks
             })
             
             response = await llm_client.chat_json(system_prompt, user_message)
@@ -134,15 +190,28 @@ class Agent:
             if settings.debug:
                 print(f"[Agent] LLM Response: {response}")
             
-            # 4. Execute action
+            # 5. Execute action
             if response and response.get("action"):
                 print(f"[Agent] Thought: {response.get('thought', 'N/A')}")
                 print(f"[Agent] Action: {response['action']} {response.get('parameters', {})}")
                 
                 self.last_action = response
                 
-                # 特殊处理脚本执行动作
-                if response["action"] == "executeScript":
+                # 特殊处理：启动后台技能任务
+                if response["action"] == "startSkill":
+                    self.last_action_result = await self._start_skill_task(
+                        response.get("parameters", {})
+                    )
+                # 特殊处理：取消任务
+                elif response["action"] == "cancelTask":
+                    self.last_action_result = await self._cancel_task(
+                        response.get("parameters", {})
+                    )
+                # 特殊处理：查询任务状态
+                elif response["action"] == "getTaskStatus":
+                    self.last_action_result = self._get_task_status()
+                # 特殊处理脚本执行动作（同步阻塞，用于简单脚本）
+                elif response["action"] == "executeScript":
                     self.last_action_result = await self._execute_script(
                         response.get("parameters", {})
                     )
@@ -163,6 +232,91 @@ class Agent:
     async def force_tick(self):
         """Force an immediate decision cycle"""
         await self.tick()
+    
+    async def _start_skill_task(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        启动后台技能任务（非阻塞）
+        
+        Args:
+            params: 包含 skillName 和可选的 kwargs
+        """
+        skill_name = params.get("skillName", "")
+        skill_kwargs = params.get("kwargs", {})
+        
+        if not skill_name:
+            return {"success": False, "message": "未指定技能名称"}
+        
+        # 检查技能是否存在
+        skill = skill_manager.get_skill(skill_name)
+        if not skill:
+            skills = skill_manager.list_skills()
+            skill_names = [s['name'] for s in skills]
+            return {
+                "success": False,
+                "message": f"技能 '{skill_name}' 不存在，可用技能: {', '.join(skill_names)}"
+            }
+        
+        # 创建后台任务
+        async def run_skill():
+            bot_api = BotAPI()
+            return await bot_api.useSkill(skill_name, **skill_kwargs)
+        
+        task = self.task_manager.create_task(
+            name=skill_name,
+            description=skill.get("description", ""),
+            coroutine_func=run_skill
+        )
+        
+        return {
+            "success": True,
+            "message": f"已启动技能 '{skill_name}'，任务ID: {task.id}",
+            "task_id": task.id
+        }
+    
+    async def _cancel_task(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """取消指定任务或所有任务"""
+        task_id = params.get("taskId", "")
+        cancel_all = params.get("all", False)
+        
+        if cancel_all:
+            await self.task_manager.cancel_all_tasks()
+            # 同时停止bot移动
+            try:
+                await bot_client.execute_action("stopMoving", {})
+            except:
+                pass
+            return {"success": True, "message": "已取消所有任务"}
+        
+        if not task_id:
+            # 取消当前任务
+            current = self.task_manager.current_task
+            if current:
+                task_id = current.id
+            else:
+                return {"success": False, "message": "没有正在运行的任务"}
+        
+        success = await self.task_manager.cancel_task(task_id)
+        if success:
+            # 停止移动
+            try:
+                await bot_client.execute_action("stopMoving", {})
+            except:
+                pass
+            return {"success": True, "message": f"已取消任务 {task_id}"}
+        else:
+            return {"success": False, "message": f"无法取消任务 {task_id}"}
+    
+    def _get_task_status(self) -> Dict[str, Any]:
+        """获取当前任务状态"""
+        status = self.task_manager.get_status_summary()
+        history = self.task_manager.get_recent_history(5)
+        
+        return {
+            "success": True,
+            "message": status.get("summary", "无任务"),
+            "current_tasks": status,
+            "recent_history": history
+        }
     
     async def _execute_script(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a Python script for complex actions"""
@@ -243,15 +397,19 @@ class Agent:
             message = event.get("message", "")
             username = event.get("username", "")
             
-            # 检查是否是测试指令
+            # 检查是否是测试指令（使用后台任务管理器）
             if message.startswith("%test "):
-                # 异步执行测试，不阻塞事件处理
                 asyncio.create_task(self._handle_test_command(message, username))
                 return
             
             # 检查是否是停止指令
             if message.strip() == "%stop":
                 asyncio.create_task(self._handle_stop_command(username))
+                return
+            
+            # 检查是否是任务状态指令
+            if message.strip() == "%status":
+                asyncio.create_task(self._handle_status_command(username))
                 return
             
             # 检查是否是列出技能指令
@@ -272,18 +430,11 @@ class Agent:
     
     async def _handle_test_command(self, message: str, username: str):
         """
-        处理 %test 指令，直接测试技能
+        处理 %test 指令，使用后台任务管理器启动技能
         
         格式: %test 技能名
         或者: %test 技能名(参数1=值1, 参数2=值2)
         """
-        # 检查是否有正在运行的测试
-        if self._current_test_task and not self._current_test_task.done():
-            await bot_client.execute_action("chat", {
-                "message": f"@{username} 已有技能'{self._current_test_name}'在运行喵~ 用 %stop 可以停止"
-            })
-            return
-        
         try:
             # 解析指令
             command = message[6:].strip()  # 去掉 "%test "
@@ -302,22 +453,18 @@ class Agent:
             # 解析参数
             kwargs = {}
             if params_str:
-                # 解析 key=value 格式的参数
                 param_pairs = params_str.split(',')
                 for pair in param_pairs:
                     if '=' in pair:
                         key, value = pair.split('=', 1)
                         key = key.strip()
                         value = value.strip()
-                        # 尝试解析值类型
                         try:
-                            # 尝试解析为数字
                             if '.' in value:
                                 kwargs[key] = float(value)
                             else:
                                 kwargs[key] = int(value)
                         except ValueError:
-                            # 去掉引号
                             if (value.startswith('"') and value.endswith('"')) or \
                                (value.startswith("'") and value.endswith("'")):
                                 value = value[1:-1]
@@ -333,128 +480,122 @@ class Agent:
                 })
                 return
             
-            # 重置取消标志
-            self._test_cancelled = False
-            self._current_test_name = skill_name
-            self._skill_testing = True  # 暂停LLM决策
+            # 使用后台任务管理器启动技能
+            async def run_skill_with_notification():
+                try:
+                    bot_api = BotAPI()
+                    result = await asyncio.wait_for(
+                        bot_api.useSkill(skill_name, **kwargs),
+                        timeout=300.0
+                    )
+                    
+                    # 报告结果
+                    if isinstance(result, dict):
+                        success = result.get("success", True)
+                        msg = result.get("message", str(result))
+                        status_text = "成功" if success else "失败"
+                    else:
+                        status_text = "完成"
+                        msg = str(result) if result else "无返回值"
+                    
+                    await bot_client.execute_action("chat", {
+                        "message": f"@{username} 技能'{skill_name}'{status_text}: {msg[:80]}"
+                    })
+                    
+                    return result
+                    
+                except asyncio.TimeoutError:
+                    await bot_client.execute_action("chat", {
+                        "message": f"@{username} 技能'{skill_name}'超时(5分钟)喵~"
+                    })
+                    await bot_client.execute_action("stopMoving", {})
+                    raise
+                except asyncio.CancelledError:
+                    await bot_client.execute_action("chat", {
+                        "message": f"@{username} 技能'{skill_name}'已停止喵~"
+                    })
+                    await bot_client.execute_action("stopMoving", {})
+                    raise
             
-            # 通知开始测试
-            await bot_client.execute_action("chat", {
-                "message": f"@{username} 开始测试技能'{skill_name}'喵~ (用 %stop 可停止，LLM已暂停)"
-            })
-            
-            print(f"[Agent] 测试技能: {skill_name}, 参数: {kwargs} (LLM已暂停)")
-            
-            # 创建测试任务
-            self._current_test_task = asyncio.create_task(
-                self._run_skill_test(skill_name, kwargs, username)
+            task = self.task_manager.create_task(
+                name=skill_name,
+                description=f"测试技能 (由 {username} 触发)",
+                coroutine_func=run_skill_with_notification
             )
             
+            await bot_client.execute_action("chat", {
+                "message": f"@{username} 已启动技能'{skill_name}' (ID:{task.id})，LLM保持运行喵~"
+            })
+            
+            print(f"[Agent] 后台启动技能: {skill_name}, 任务ID: {task.id}, 参数: {kwargs}")
+            
         except Exception as e:
             import traceback
             print(f"[Agent] 技能测试错误: {traceback.format_exc()}")
             await bot_client.execute_action("chat", {
                 "message": f"@{username} 测试出错喵: {str(e)[:50]}"
             })
-            self._current_test_task = None
-            self._current_test_name = None
-    
-    async def _run_skill_test(self, skill_name: str, kwargs: dict, username: str):
-        """运行技能测试（带超时和取消支持）"""
-        try:
-            # 创建 BotAPI 并执行技能
-            bot_api = BotAPI()
-            
-            # 使用 wait_for 添加超时（默认5分钟）
-            try:
-                result = await asyncio.wait_for(
-                    bot_api.useSkill(skill_name, **kwargs),
-                    timeout=300.0  # 5分钟超时
-                )
-            except asyncio.TimeoutError:
-                await bot_client.execute_action("chat", {
-                    "message": f"@{username} 技能'{skill_name}'执行超时(5分钟)喵~"
-                })
-                # 停止移动
-                await bot_client.execute_action("stopMoving", {})
-                return
-            except asyncio.CancelledError:
-                await bot_client.execute_action("chat", {
-                    "message": f"@{username} 技能'{skill_name}'已被停止喵~"
-                })
-                # 停止移动
-                await bot_client.execute_action("stopMoving", {})
-                return
-            
-            # 检查是否被取消
-            if self._test_cancelled:
-                return
-            
-            # 报告结果
-            if isinstance(result, dict):
-                success = result.get("success", True)
-                msg = result.get("message", str(result))
-                status = "成功" if success else "失败"
-            else:
-                status = "完成"
-                msg = str(result) if result else "无返回值"
-            
-            await bot_client.execute_action("chat", {
-                "message": f"@{username} 技能测试{status}: {msg[:100]}"
-            })
-            
-            print(f"[Agent] 技能测试结果: {result}")
-            
-        except asyncio.CancelledError:
-            # 被 %stop 取消
-            print(f"[Agent] 技能测试被取消: {skill_name}")
-            await bot_client.execute_action("stopMoving", {})
-        except Exception as e:
-            import traceback
-            print(f"[Agent] 技能测试错误: {traceback.format_exc()}")
-            await bot_client.execute_action("chat", {
-                "message": f"@{username} 测试出错喵: {str(e)[:50]}"
-            })
-        finally:
-            self._current_test_task = None
-            self._current_test_name = None
-            self._skill_testing = False  # 恢复LLM决策
-            print(f"[Agent] 技能测试结束，LLM已恢复")
     
     async def _handle_stop_command(self, username: str):
-        """处理 %stop 指令，停止当前技能测试"""
-        if not self._current_test_task or self._current_test_task.done():
+        """处理 %stop 指令，停止当前任务"""
+        current_task = self.task_manager.current_task
+        
+        if not current_task:
             await bot_client.execute_action("chat", {
-                "message": f"@{username} 没有正在运行的技能喵~"
+                "message": f"@{username} 没有正在运行的任务喵~"
             })
             return
         
-        skill_name = self._current_test_name or "未知技能"
-        self._test_cancelled = True
-        self._skill_testing = False  # 恢复LLM决策
+        task_name = current_task.name
+        task_id = current_task.id
         
-        # 取消任务
-        self._current_test_task.cancel()
+        success = await self.task_manager.cancel_task(task_id)
         
-        # 停止bot移动
+        # 停止移动
         try:
             await bot_client.execute_action("stopMoving", {})
         except:
             pass
         
-        print(f"[Agent] 停止技能测试: {skill_name}，LLM已恢复")
-        await bot_client.execute_action("chat", {
-            "message": f"@{username} 已停止技能'{skill_name}'喵~ LLM已恢复"
-        })
+        if success:
+            print(f"[Agent] 停止任务: {task_name} (ID: {task_id})")
+            await bot_client.execute_action("chat", {
+                "message": f"@{username} 已停止任务'{task_name}'喵~"
+            })
+        else:
+            await bot_client.execute_action("chat", {
+                "message": f"@{username} 停止任务失败喵~"
+            })
+    
+    async def _handle_status_command(self, username: str):
+        """处理 %status 指令，显示当前任务状态"""
+        status = self.task_manager.get_status_summary()
+        
+        if not status.get("has_active_tasks"):
+            await bot_client.execute_action("chat", {
+                "message": f"@{username} 当前没有运行中的任务喵~"
+            })
+        else:
+            running = status.get("running_count", 0)
+            pending = status.get("pending_count", 0)
+            
+            # 获取当前任务详情
+            current = self.task_manager.current_task
+            if current:
+                duration = current._get_duration() or 0
+                await bot_client.execute_action("chat", {
+                    "message": f"@{username} 运行:{running} 等待:{pending} | {current.name}: {current.progress} ({duration:.1f}s)"
+                })
+            else:
+                await bot_client.execute_action("chat", {
+                    "message": f"@{username} 运行中:{running} 等待中:{pending}"
+                })
     
     async def _handle_help_command(self, username: str):
         """处理 %help 指令，显示帮助信息"""
         help_text = (
-            "可用指令: "
-            "%skills - 列出技能 | "
-            "%test 技能名 - 测试技能 | "
-            "%test 技能名(参数=值) - 带参数测试 | "
-            "%stop - 停止当前技能"
+            "指令: %skills-列出技能 | %test 技能名-测试 | "
+            "%test 技能(参数=值)-带参测试 | %stop-停止 | %status-状态"
         )
         await bot_client.execute_action("chat", {
             "message": f"@{username} {help_text}"
@@ -489,13 +630,14 @@ class Agent:
     
     def get_status(self) -> Dict[str, Any]:
         """Get agent status"""
+        task_status = self.task_manager.get_status_summary()
+        
         return {
             "is_running": self.is_running,
             "last_action": self.last_action,
             "last_action_result": self.last_action_result,
             "pending_chat_count": len(self._pending_chat),
-            "skill_testing": self._skill_testing,
-            "current_test_skill": self._current_test_name
+            "active_tasks": task_status
         }
 
 

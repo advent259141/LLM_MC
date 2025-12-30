@@ -6,6 +6,7 @@ from app.agent.agent import agent
 from app.bot.client import bot_client
 from app.script.executor import script_executor
 from app.skills.manager import skill_manager
+from app.task.manager import task_manager
 
 
 router = APIRouter()
@@ -152,6 +153,7 @@ async def execute_script(request: ScriptRequest):
     - bot.chat(message)
     - bot.goTo(x, y, z)
     - bot.followPlayer(playerName)
+    - bot.listPlayers() - 获取服务器上所有在线玩家列表
     - bot.stopMoving()
     - bot.jump()
     - bot.lookAt(x, y, z)
@@ -322,3 +324,146 @@ async def get_skills_description():
         "success": True,
         "description": description
     }
+
+
+# ========== Task Management Endpoints ==========
+
+@router.get("/tasks")
+async def list_tasks():
+    """
+    获取当前所有任务状态
+    
+    Returns:
+        包含运行中和等待中任务的列表
+    """
+    status = task_manager.get_status_summary()
+    history = task_manager.get_recent_history(10)
+    
+    return {
+        "success": True,
+        "status": status,
+        "history": history
+    }
+
+
+@router.get("/tasks/current")
+async def get_current_task():
+    """
+    获取当前正在运行的主要任务
+    
+    Returns:
+        当前任务详情，或 null
+    """
+    current = task_manager.current_task
+    
+    if current:
+        return {
+            "success": True,
+            "task": current.to_dict()
+        }
+    else:
+        return {
+            "success": True,
+            "task": None,
+            "message": "没有正在运行的任务"
+        }
+
+
+@router.get("/tasks/{task_id}")
+async def get_task(task_id: str):
+    """
+    获取指定任务的详情
+    
+    Args:
+        task_id: 任务ID
+    """
+    task = task_manager.get_task(task_id)
+    
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+    
+    return {
+        "success": True,
+        "task": task.to_dict()
+    }
+
+
+class StartSkillRequest(BaseModel):
+    """启动技能请求"""
+    skillName: str
+    kwargs: Optional[Dict[str, Any]] = None
+
+
+@router.post("/tasks/start-skill")
+async def start_skill_task(request: StartSkillRequest):
+    """
+    启动一个后台技能任务
+    
+    Args:
+        skillName: 技能名称
+        kwargs: 技能参数（可选）
+    """
+    from app.script.executor import BotAPI
+    
+    skill = skill_manager.get_skill(request.skillName)
+    if not skill:
+        raise HTTPException(status_code=404, detail=f"Skill '{request.skillName}' not found")
+    
+    # 创建后台任务
+    async def run_skill():
+        bot_api = BotAPI()
+        return await bot_api.useSkill(request.skillName, **(request.kwargs or {}))
+    
+    task = task_manager.create_task(
+        name=request.skillName,
+        description=skill.get("description", ""),
+        coroutine_func=run_skill
+    )
+    
+    return {
+        "success": True,
+        "message": f"已启动技能 '{request.skillName}'",
+        "task": task.to_dict()
+    }
+
+
+@router.post("/tasks/{task_id}/cancel")
+async def cancel_task(task_id: str):
+    """
+    取消指定任务
+    
+    Args:
+        task_id: 任务ID
+    """
+    task = task_manager.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+    
+    success = await task_manager.cancel_task(task_id)
+    
+    # 停止机器人移动
+    try:
+        await bot_client.execute_action("stopMoving", {})
+    except:
+        pass
+    
+    if success:
+        return {"success": True, "message": f"已取消任务 {task_id}"}
+    else:
+        return {"success": False, "message": f"无法取消任务 {task_id}（可能已完成）"}
+
+
+@router.post("/tasks/cancel-all")
+async def cancel_all_tasks():
+    """
+    取消所有正在运行的任务
+    """
+    await task_manager.cancel_all_tasks()
+    
+    # 停止机器人移动
+    try:
+        await bot_client.execute_action("stopMoving", {})
+    except:
+        pass
+    
+    return {"success": True, "message": "已取消所有任务"}

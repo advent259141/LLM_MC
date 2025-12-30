@@ -171,6 +171,26 @@ class BotAPI:
         self.results.append({"action": "scanEntities", "result": result})
         return result
     
+    async def listPlayers(self) -> Dict[str, Any]:
+        """
+        列出服务器上所有在线玩家
+        
+        Returns:
+            包含玩家列表的字典：
+            - players: 玩家列表，每个玩家包含 name, position, distance, inRange 等信息
+            - totalCount: 总玩家数
+            - inRangeCount: 在可见范围内的玩家数
+            - botUsername: bot 自己的用户名
+            
+        Example:
+            players = await bot.listPlayers()
+            for p in players['players']:
+                print(f"玩家 {p['name']} 在 {p.get('distance', '未知')} 格外")
+        """
+        result = await bot_client.execute_action("listPlayers", {})
+        self.results.append({"action": "listPlayers", "result": result})
+        return result
+    
     async def canReach(self, x: int, y: int, z: int) -> Dict[str, Any]:
         """检查坐标是否可达（不实际移动）"""
         result = await bot_client.execute_action("canReach", {"x": x, "y": y, "z": z})
@@ -333,6 +353,107 @@ class BotAPI:
         self.results.append({"action": "findChest", "result": result})
         return result
     
+    # ===== 实体交互方法 =====
+    
+    async def mountEntity(self, entityType: str = None) -> Dict[str, Any]:
+        """
+        骑乘实体（马、船、矿车、猪等）
+        
+        Args:
+            entityType: 实体类型（可选，如 horse, boat, minecart）
+                       不指定则骑乘最近的可骑乘实体
+            
+        Returns:
+            骑乘结果
+            
+        Example:
+            await bot.mountEntity("horse")  # 骑马
+            await bot.mountEntity("boat")   # 上船
+            await bot.mountEntity()         # 骑乘最近的可骑乘实体
+        """
+        params = {}
+        if entityType:
+            params["entityType"] = entityType
+        result = await bot_client.execute_action("mountEntity", params)
+        self.results.append({"action": "mountEntity", "result": result})
+        return result
+    
+    async def dismount(self) -> Dict[str, Any]:
+        """
+        从当前骑乘的实体上下来
+        
+        Returns:
+            下马/下船结果
+            
+        Example:
+            await bot.dismount()  # 下马/下船
+        """
+        result = await bot_client.execute_action("dismount", {})
+        self.results.append({"action": "dismount", "result": result})
+        return result
+    
+    async def useOnEntity(self, entityType: str, hand: str = "hand") -> Dict[str, Any]:
+        """
+        对实体使用物品/右键交互（喂动物、与村民交易、拴绳等）
+        
+        Args:
+            entityType: 实体类型（如 cow, villager, pig）
+            hand: 使用哪只手（hand 或 off-hand，默认 hand）
+            
+        Returns:
+            交互结果
+            
+        Example:
+            await bot.equipItem("wheat")
+            await bot.useOnEntity("cow")  # 用小麦喂牛
+            
+            await bot.useOnEntity("villager")  # 与村民交易
+        """
+        result = await bot_client.execute_action("useOnEntity", {
+            "entityType": entityType, "hand": hand
+        })
+        self.results.append({"action": "useOnEntity", "result": result})
+        return result
+    
+    # ===== 数据查询方法 =====
+    
+    async def getRecipeData(self, itemName: str) -> Dict[str, Any]:
+        """
+        从 minecraft-data 获取物品的配方数据
+        
+        Args:
+            itemName: 物品名称
+            
+        Returns:
+            配方信息，包含材料需求和是否需要工作台
+            
+        Example:
+            recipe = await bot.getRecipeData("wooden_pickaxe")
+            if recipe.get("found"):
+                for r in recipe["recipes"]:
+                    print(f"材料: {r['ingredients']}, 需要工作台: {r['needsCraftingTable']}")
+        """
+        result = await bot_client.execute_action("getRecipeData", {"itemName": itemName})
+        self.results.append({"action": "getRecipeData", "result": result})
+        return result
+    
+    async def getAllRecipes(self) -> Dict[str, Any]:
+        """
+        获取所有可合成物品的配方数据
+        
+        Returns:
+            包含所有配方的字典，可用于构建配方缓存
+            
+        Example:
+            all_recipes = await bot.getAllRecipes()
+            # 检查某物品是否可合成
+            if "diamond_pickaxe" in all_recipes["recipes"]:
+                print("钻石镐可以合成")
+        """
+        result = await bot_client.execute_action("getAllRecipes", {})
+        self.results.append({"action": "getAllRecipes", "result": result})
+        return result
+    
     async def getObservation(self) -> Dict[str, Any]:
         """获取当前观察状态"""
         return await bot_client.get_observation()
@@ -350,6 +471,127 @@ class BotAPI:
         """获取生命值和饥饿值"""
         observation = await bot_client.get_observation()
         return observation.get("health", {"health": 20, "food": 20})
+    
+    # ===== 事件等待方法 =====
+    
+    async def waitForEvent(
+        self,
+        event_type: str,
+        filter_func = None,
+        timeout: float = 30.0
+    ) -> Optional[Dict[str, Any]]:
+        """
+        等待特定类型的游戏事件
+        
+        Args:
+            event_type: 事件类型，支持的类型包括:
+                - 'playerCollect': 玩家捡起物品
+                - 'chat': 聊天消息
+                - 'health': 生命值变化
+                - 'death': 死亡
+                - 'spawn': 重生
+                - 'itemDrop': 物品掉落
+                - 'entitySpawn': 实体生成
+            filter_func: 可选的过滤函数，接收事件数据，返回 True 表示匹配
+            timeout: 超时时间（秒），默认 30 秒
+            
+        Returns:
+            匹配的事件数据，超时返回 None
+            
+        Example:
+            # 等待某个玩家捡起物品
+            event = await bot.waitForEvent(
+                "playerCollect",
+                filter_func=lambda e: e.get("collector", {}).get("name") == "Steve",
+                timeout=10.0
+            )
+            if event:
+                print(f"玩家 {event['collector']['name']} 捡起了物品")
+            else:
+                print("超时，没有玩家捡起物品")
+                
+            # 等待聊天消息
+            event = await bot.waitForEvent(
+                "chat",
+                filter_func=lambda e: "hello" in e.get("message", "").lower(),
+                timeout=60.0
+            )
+        """
+        self.log(f"等待事件: {event_type} (超时: {timeout}秒)")
+        result = await bot_client.wait_for_event(event_type, filter_func, timeout)
+        
+        if result:
+            self.log(f"收到事件: {event_type}")
+            self.results.append({"action": f"waitForEvent:{event_type}", "result": result})
+        else:
+            self.log(f"等待事件超时: {event_type}")
+            self.results.append({"action": f"waitForEvent:{event_type}", "result": {"timeout": True}})
+        
+        return result
+    
+    async def waitForPlayerCollect(
+        self,
+        player_name: str = None,
+        timeout: float = 30.0
+    ) -> Optional[Dict[str, Any]]:
+        """
+        等待玩家捡起物品（playerCollect 事件的便捷方法）
+        
+        Args:
+            player_name: 可选，指定等待的玩家名。不指定则等待任意玩家
+            timeout: 超时时间（秒），默认 30 秒
+            
+        Returns:
+            事件数据，包含 collector 和 collected 信息，超时返回 None
+            
+        Example:
+            # 等待 Steve 捡起物品
+            event = await bot.waitForPlayerCollect("Steve", timeout=10.0)
+            if event:
+                print(f"Steve 捡起了物品")
+            
+            # 等待任意玩家捡起
+            event = await bot.waitForPlayerCollect(timeout=15.0)
+        """
+        if player_name:
+            filter_func = lambda e: e.get("collector", {}).get("name") == player_name
+        else:
+            filter_func = None
+        
+        return await self.waitForEvent("playerCollect", filter_func, timeout)
+    
+    async def waitForChat(
+        self,
+        from_player: str = None,
+        contains: str = None,
+        timeout: float = 30.0
+    ) -> Optional[Dict[str, Any]]:
+        """
+        等待聊天消息（chat 事件的便捷方法）
+        
+        Args:
+            from_player: 可选，只等待来自特定玩家的消息
+            contains: 可选，消息必须包含的文本
+            timeout: 超时时间（秒），默认 30 秒
+            
+        Returns:
+            事件数据，包含 username 和 message，超时返回 None
+            
+        Example:
+            # 等待来自 Steve 的消息
+            event = await bot.waitForChat(from_player="Steve", timeout=30.0)
+            
+            # 等待包含 "yes" 的消息
+            event = await bot.waitForChat(contains="yes", timeout=30.0)
+        """
+        def filter_func(e):
+            if from_player and e.get("username") != from_player:
+                return False
+            if contains and contains.lower() not in e.get("message", "").lower():
+                return False
+            return True
+        
+        return await self.waitForEvent("chat", filter_func, timeout)
     
     # ===== 技能库相关方法 =====
     

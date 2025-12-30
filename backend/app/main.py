@@ -1,9 +1,11 @@
 from contextlib import asynccontextmanager
+import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
 from app.bot.client import bot_client
+from app.agent.agent import agent
 from app.config import settings
 
 
@@ -18,10 +20,20 @@ async def lifespan(app: FastAPI):
     await bot_client.start_ws_listener()
     print("✅ Backend ready!")
     
+    # Auto-start agent if enabled
+    if settings.auto_start_agent:
+        # Wait a bit for bot service to be ready
+        await asyncio.sleep(2)
+        print("🤖 Auto-starting Agent...")
+        await agent.start()
+        print("✅ Agent started!")
+    
     yield
     
     # Shutdown
     print("👋 Shutting down...")
+    if agent.is_running:
+        await agent.stop()
     await bot_client.close()
 
 

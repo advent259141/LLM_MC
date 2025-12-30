@@ -1,4 +1,7 @@
 from typing import Dict, Any, List, Optional
+from pathlib import Path
+import json
+from ..skills.manager import skill_manager
 
 
 # ============================================================
@@ -24,130 +27,120 @@ BOT_PERSONA = {
 }
 
 # ============================================================
-# 🎯 原子动作列表 - 只包含基础动作，复杂操作使用 executeScript
+# 🎯 动作配置文件路径
 # ============================================================
 
-AVAILABLE_ACTIONS = [
-    # === 交互类 ===
-    {
-        "name": "chat",
-        "description": "发送聊天消息",
-        "parameters": {"message": "string - 要发送的消息"}
-    },
-    {
-        "name": "wait",
-        "description": "等待指定时间",
-        "parameters": {"seconds": "number - 等待秒数"}
-    },
+ACTIONS_CONFIG_FILE = Path(__file__).parent.parent.parent / "actions.json"
+
+# 缓存动作列表
+_actions_cache: List[dict] = None
+_actions_cache_mtime: float = 0
+
+
+def load_actions() -> List[dict]:
+    """
+    从配置文件动态加载动作列表
     
-    # === 移动类 ===
-    {
-        "name": "goTo",
-        "description": "移动到指定坐标",
-        "parameters": {"x": "number", "y": "number", "z": "number"}
-    },
-    {
-        "name": "stopMoving",
-        "description": "停止移动",
-        "parameters": {}
-    },
-    {
-        "name": "jump",
-        "description": "跳跃一次",
-        "parameters": {}
-    },
-    {
-        "name": "lookAt",
-        "description": "看向指定坐标",
-        "parameters": {"x": "number", "y": "number", "z": "number"}
-    },
-    {
-        "name": "followPlayer",
-        "description": "跟随指定玩家（持续跟随，使用stopMoving停止）",
-        "parameters": {"playerName": "string - 玩家名称"}
-    },
+    Returns:
+        动作列表
+    """
+    global _actions_cache, _actions_cache_mtime
     
-    # === 动作类 ===
-    {
-        "name": "attack",
-        "description": "攻击最近的指定类型实体（单次攻击）",
-        "parameters": {"entityType": "string - 实体类型 (如 zombie, skeleton, pig)"}
-    },
-    {
-        "name": "collectBlock",
-        "description": "挖掘并收集最近的指定类型方块",
-        "parameters": {"blockType": "string - 方块类型 (如 oak_log, stone, diamond_ore)"}
-    },
-    {
-        "name": "placeBlock",
-        "description": "在指定位置放置方块",
-        "parameters": {
-            "blockName": "string - 方块名称",
-            "x": "number", "y": "number", "z": "number"
-        }
-    },
-    {
-        "name": "equipItem",
-        "description": "装备物品到手上",
-        "parameters": {"itemName": "string - 物品名称 (如 diamond_sword)"}
-    },
-    {
-        "name": "dropItem",
-        "description": "丢弃物品",
-        "parameters": {
-            "itemName": "string - 物品名称",
-            "count": "number - 可选：丢弃数量（默认全部）"
-        }
-    },
-    {
-        "name": "eat",
-        "description": "吃东西恢复饥饿值",
-        "parameters": {
-            "foodName": "string - 可选：指定食物名称（不指定则自动选择）"
-        }
-    },
-    {
-        "name": "useItem",
-        "description": "使用当前手持物品（如使用弓箭、喝药水、使用末影珍珠等）",
-        "parameters": {}
-    },
-    {
-        "name": "activateBlock",
-        "description": "右键激活/交互方块（如打开门、按按钮、拉拉杆、使用床等）",
-        "parameters": {
-            "x": "number - X坐标",
-            "y": "number - Y坐标",
-            "z": "number - Z坐标"
-        }
-    },
+    # 检查文件是否存在
+    if not ACTIONS_CONFIG_FILE.exists():
+        print(f"[prompts] 警告: 动作配置文件不存在: {ACTIONS_CONFIG_FILE}")
+        return []
     
-    # === 感知类 ===
-    {
-        "name": "viewInventory",
-        "description": "查看背包物品",
-        "parameters": {}
-    },
-    {
-        "name": "findBlock",
-        "description": "寻找最近的指定方块",
-        "parameters": {
-            "blockType": "string - 方块名称",
-            "maxDistance": "number - 最大距离（默认32）"
-        }
-    },
-    {
-        "name": "scanEntities",
-        "description": "扫描周围实体",
-        "parameters": {
-            "range": "number - 范围（默认16）",
-            "entityType": "string - 可选：过滤类型"
-        }
-    },
+    # 检查文件是否有更新（基于修改时间）
+    current_mtime = ACTIONS_CONFIG_FILE.stat().st_mtime
+    if _actions_cache is not None and current_mtime == _actions_cache_mtime:
+        return _actions_cache
     
-    # === 脚本执行（用于复杂任务）===
-    {
-        "name": "executeScript",
-        "description": """执行Python脚本完成复杂任务。使用此动作可以调用已保存的技能库或编写自定义逻辑。
+    # 重新加载
+    try:
+        with open(ACTIONS_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            actions_dict = json.load(f)
+        
+        # 转换为列表格式
+        _actions_cache = list(actions_dict.values())
+        _actions_cache_mtime = current_mtime
+        
+        print(f"[prompts] 已加载 {len(_actions_cache)} 个动作")
+        return _actions_cache
+    except Exception as e:
+        print(f"[prompts] 加载动作配置失败: {e}")
+        return []
+
+
+def get_available_actions() -> List[dict]:
+    """
+    获取可用的动作列表（动态加载）
+    
+    Returns:
+        动作列表
+    """
+    return load_actions()
+
+
+def get_skills_section() -> str:
+    """
+    动态生成技能库部分的提示词
+    
+    Returns:
+        技能库描述文本
+    """
+    skills = skill_manager.list_skills()
+    
+    if not skills:
+        return """## 🛠️ 技能库
+
+当前没有保存的技能。你可以使用 executeScript 编写复杂逻辑。
+
+查看所有技能：`bot.listSkills()`"""
+    
+    # 构建技能表格
+    lines = [
+        "## 🛠️ 技能库 - 复杂任务请优先使用技能！",
+        "",
+        "技能是预定义的复杂操作，比直接写脚本更可靠。调用方式：`await bot.useSkill(\"技能名\", 参数=值)`",
+        "",
+        "| 技能名 | 描述 | 参数 | 示例 |",
+        "|--------|------|------|------|"
+    ]
+    
+    for skill in skills:
+        name = skill.get("name", "")
+        desc = skill.get("description", "无描述")
+        params = skill.get("params", [])
+        
+        # 格式化参数
+        if params:
+            params_str = ", ".join(f"{p}=值" for p in params)
+            # 生成示例
+            example_params = ", ".join(f'{p}=...' for p in params)
+            example = f'`await bot.useSkill("{name}", {example_params})`'
+        else:
+            params_str = "无"
+            example = f'`await bot.useSkill("{name}")`'
+        
+        lines.append(f"| **{name}** | {desc} | {params_str} | {example} |")
+    
+    lines.append("")
+    lines.append("查看所有技能：`bot.listSkills()`")
+    
+    return "\n".join(lines)
+
+
+def get_executeScript_description() -> str:
+    """
+    生成 executeScript 动作的描述，动态包含技能库信息
+    
+    Returns:
+        executeScript 动作的完整描述
+    """
+    skills_section = get_skills_section()
+    
+    return f"""执行Python脚本完成复杂任务。使用此动作可以调用已保存的技能库或编写自定义逻辑。
 
 脚本格式：
 ```python
@@ -160,34 +153,23 @@ async def main(bot):
 - 移动: await bot.goTo(x,y,z) / bot.stopMoving() / bot.jump() / bot.lookAt(x,y,z) / bot.followPlayer(name)
 - 动作: await bot.attack(type) / bot.collectBlock(type) / bot.placeBlock(name,x,y,z)
 - 物品: await bot.equipItem(name) / bot.dropItem(name,count) / bot.eat(food) / bot.useItem()
-- 交互: await bot.activateBlock(x,y,z)
-- 感知: await bot.viewInventory() / bot.findBlock(type,dist) / bot.scanEntities(range,type)
+- 方块交互: await bot.activateBlock(x,y,z)
+- 实体交互: await bot.mountEntity(type) / bot.dismount() / bot.useOnEntity(type)
+- 感知: await bot.viewInventory() / bot.findBlock(type,dist) / bot.scanEntities(range,type) / bot.listPlayers()
 - 状态: await bot.getPosition() / bot.getHealth()
 - 其他: await bot.chat(msg) / bot.wait(sec) / bot.log(msg)
 
 **重要：API返回值格式**
-- `viewInventory()` 返回 `{"inventory": [{"name": "item_name", "count": 数量}, ...]}` - 遍历物品用 `result.get("inventory", [])`
-- `scanEntities(range, type)` 返回 `{"entities": [{"name": "...", "position": {"x":..,"y":..,"z":..}, "distance": ...}, ...]}` - 遍历用 `result.get("entities", [])`
-- `findBlock(type, dist)` 返回 `{"found": true/false, "position": {"x":..,"y":..,"z":..}, "distance": ...}`
-- `getPosition()` 返回 `{"x": ..., "y": ..., "z": ...}`
-- `getHealth()` 返回 `{"health": 数值, "food": 数值}`
+- `viewInventory()` 返回 `{{"inventory": [{{"name": "item_name", "count": 数量}}, ...]}}` - 遍历物品用 `result.get("inventory", [])`
+- `scanEntities(range, type)` 返回 `{{"entities": [{{"name": "...", "position": {{"x":..,"y":..,"z":..}}, "distance": ...}}, ...]}}` - 遍历用 `result.get("entities", [])`
+- `listPlayers()` 返回 `{{"players": [{{"name": "玩家昵称", "position": {{...}}, "distance": ..., "inRange": true/false}}, ...], "totalCount": 数量}}` - 获取玩家昵称用于 followPlayer
+- `findBlock(type, dist)` 返回 `{{"found": true/false, "position": {{"x":..,"y":..,"z":..}}, "distance": ...}}`
+- `getPosition()` 返回 `{{"x": ..., "y": ..., "z": ...}}`
+- `getHealth()` 返回 `{{"health": 数值, "food": 数值}}`
 
 ---
 
-## 🛠️ 技能库 - 复杂任务请优先使用技能！
-
-技能是预定义的复杂操作，比直接写脚本更可靠。调用方式：`await bot.useSkill("技能名", 参数=值)`
-
-| 技能名 | 描述 | 参数 | 示例 |
-|--------|------|------|------|
-| **采集木头** | 自动寻找并采集各种木头 | count=数量 | `await bot.useSkill("采集木头", count=10)` |
-| **打怪** | 自动寻找并击杀敌对生物 | count=数量, mob_type=类型 | `await bot.useSkill("打怪", count=5, mob_type="zombie")` |
-| **合成** | 合成物品（自动处理工作台） | itemName=物品名, count=数量 | `await bot.useSkill("合成", itemName="wooden_pickaxe", count=1)` |
-| **挖矿** | 自动寻找并采集矿石 | oreType=矿石类型, count=数量 | `await bot.useSkill("挖矿", oreType="iron_ore", count=5)` |
-| **钓鱼** | 自动钓鱼 | duration=秒数 | `await bot.useSkill("钓鱼", duration=120)` |
-| **拾取物品** | 自动拾取附近掉落的物品 | itemName=物品名(可选), maxDistance=范围, timeout=超时 | `await bot.useSkill("拾取物品", maxDistance=16)` |
-
-查看所有技能：`bot.listSkills()`
+{skills_section}
 
 ---
 
@@ -208,25 +190,29 @@ async def main(bot):
     await bot.useSkill("挖矿", oreType="iron_ore", count=5)
     
     return "生存开局完成！"
-```""",
-        "parameters": {
-            "script": "string - Python脚本代码",
-            "description": "string - 脚本描述",
-            "timeout": "number - 超时秒数（默认300）"
-        }
-    }
-]
+```"""
 
 
 def get_action_descriptions() -> str:
-    """Format action list for prompt"""
+    """Format action list for prompt - 动态加载动作列表"""
     lines = []
-    for action in AVAILABLE_ACTIONS:
-        params = ", ".join(
-            f"{k}: {v}" for k, v in action["parameters"].items()
-        ) if action["parameters"] else "none"
-        lines.append(f"  - {action['name']}: {action['description']}")
-        lines.append(f"    Parameters: {params}")
+    actions = get_available_actions()
+    
+    for action in actions:
+        # 对 executeScript 特殊处理，使用动态生成的描述
+        if action['name'] == 'executeScript':
+            desc = get_executeScript_description()
+            params = ", ".join(
+                f"{k}: {v}" for k, v in action["parameters"].items()
+            )
+            lines.append(f"  - {action['name']}: {desc}")
+            lines.append(f"    Parameters: {params}")
+        else:
+            params = ", ".join(
+                f"{k}: {v}" for k, v in action["parameters"].items()
+            ) if action["parameters"] else "none"
+            lines.append(f"  - {action['name']}: {action['description']}")
+            lines.append(f"    Parameters: {params}")
     return "\n".join(lines)
 
 
@@ -234,14 +220,32 @@ def get_agent_system_prompt(bot_state: Optional[Dict[str, Any]] = None) -> str:
     """Generate the system prompt for the Minecraft agent"""
     
     action_descriptions = get_action_descriptions()
+    task_actions = get_task_actions_description()
+    
     state_json = ""
+    has_active_tasks = False
     if bot_state:
         import json
+        has_active_tasks = bot_state.get("has_active_tasks", False)
         state_json = json.dumps(bot_state, indent=2, ensure_ascii=False)
     
     # 获取人格设定
     persona_name = BOT_PERSONA.get("name", "Bot")
     persona_desc = BOT_PERSONA.get("personality", "")
+    
+    # 任务状态提示
+    task_status_hint = ""
+    if has_active_tasks:
+        task_status_hint = """
+## ⚡ 后台任务运行中
+
+你当前有后台任务正在执行（详见观察信息中的"当前后台任务"）。
+- 任务在后台运行，你仍然可以响应玩家聊天和处理其他事务
+- 如果玩家要求停止任务，使用 `cancelTask` 动作
+- 如果需要查看任务详情，使用 `getTaskStatus` 动作
+- 你可以继续与玩家互动，无需等待任务完成
+
+"""
     
     return f"""# 🎭 角色设定
 
@@ -256,8 +260,10 @@ def get_agent_system_prompt(bot_state: Optional[Dict[str, Any]] = None) -> str:
 你可以执行以下动作：
 {action_descriptions}
 
----
+{task_actions}
 
+---
+{task_status_hint}
 # 📝 响应格式
 
 你必须以JSON格式响应，格式如下：
@@ -277,13 +283,43 @@ def get_agent_system_prompt(bot_state: Optional[Dict[str, Any]] = None) -> str:
 2. **积极响应聊天**：当有人和你说话时，用chat动作回复，回复内容要符合你的人格
 3. **生存优先**：注意你的生命值和饥饿值
 4. **乐于助人**：帮助玩家完成他们的请求
-5. **无事可做时**：可以用wait等待，或主动打招呼
-6. **只输出JSON**：不要输出任何JSON之外的内容
+5. **后台任务运行时**：你仍可以聊天和响应，任务状态会在观察中显示
+6. **启动长时间任务**：对于复杂/耗时任务（挖矿、采集等），优先使用 startSkill 启动后台任务
+7. **无事可做时**：可以用wait等待，或主动打招呼
+8. **只输出JSON**：不要输出任何JSON之外的内容
 
 ---
 
 # 📊 当前状态
 {state_json if state_json else "暂无状态信息"}
+"""
+
+
+def get_task_actions_description() -> str:
+    """
+    获取任务管理相关动作的描述
+    """
+    return """
+## 🔄 后台任务管理动作
+
+这些动作用于管理后台运行的技能任务，让你可以在执行长时间任务的同时响应玩家：
+
+  - **startSkill**: 启动后台技能任务（非阻塞，技能在后台运行，你可以继续响应）
+    Parameters: skillName: 技能名称, kwargs: 技能参数字典（可选）
+    示例: {"action": "startSkill", "parameters": {"skillName": "挖矿", "kwargs": {"oreType": "iron_ore", "count": 10}}}
+    
+  - **cancelTask**: 取消正在运行的任务
+    Parameters: taskId: 任务ID（可选，不填则取消当前任务）, all: 是否取消全部任务（可选）
+    示例: {"action": "cancelTask", "parameters": {"all": true}}
+    
+  - **getTaskStatus**: 获取当前任务状态详情
+    Parameters: 无
+    示例: {"action": "getTaskStatus", "parameters": {}}
+
+**使用场景**:
+- 玩家说"帮我挖10个铁矿"→ 使用 startSkill 启动后台任务，然后可以继续聊天
+- 玩家说"停下"/"不要挖了" → 使用 cancelTask 取消任务
+- 你想知道任务进度 → 使用 getTaskStatus 查看
 """
 
 

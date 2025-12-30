@@ -19,7 +19,7 @@
   },
   "挖矿": {
     "name": "挖矿",
-    "description": "自动寻找并采集指定类型的矿石",
+    "description": "自动寻找并采集指定类型的矿石，会自动挖开挡路的方块",
     "params": ["oreType", "count"],
     "file": "挖矿.py"
   },
@@ -34,5 +34,11 @@
     "description": "自动拾取附近掉落的物品",
     "params": ["itemName", "maxDistance", "timeout"],
     "file": "拾取物品.py"
+  },
+  "丢给玩家": {
+    "name": "丢给玩家",
+    "description": "给指定玩家丢物品，并通过事件确认玩家是否捡起",
+    "params": ["player_name", "item_name", "count", "timeout"],
+    "file": "丢给玩家.py"
   }
 }

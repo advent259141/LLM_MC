@@ -1,0 +1,144 @@
+{
+  "chat": {
+    "name": "chat",
+    "description": "发送聊天消息",
+    "parameters": {"message": "string - 要发送的消息"}
+  },
+  "wait": {
+    "name": "wait",
+    "description": "等待指定时间",
+    "parameters": {"seconds": "number - 等待秒数"}
+  },
+  "goTo": {
+    "name": "goTo",
+    "description": "移动到指定坐标",
+    "parameters": {"x": "number", "y": "number", "z": "number"}
+  },
+  "stopMoving": {
+    "name": "stopMoving",
+    "description": "停止移动",
+    "parameters": {}
+  },
+  "jump": {
+    "name": "jump",
+    "description": "跳跃一次",
+    "parameters": {}
+  },
+  "lookAt": {
+    "name": "lookAt",
+    "description": "看向指定坐标",
+    "parameters": {"x": "number", "y": "number", "z": "number"}
+  },
+  "followPlayer": {
+    "name": "followPlayer",
+    "description": "跟随指定玩家（持续跟随，使用stopMoving停止）",
+    "parameters": {"playerName": "string - 玩家名称"}
+  },
+  "attack": {
+    "name": "attack",
+    "description": "攻击最近的指定类型实体（单次攻击）",
+    "parameters": {"entityType": "string - 实体类型 (如 zombie, skeleton, pig)"}
+  },
+  "collectBlock": {
+    "name": "collectBlock",
+    "description": "挖掘并收集最近的指定类型方块",
+    "parameters": {"blockType": "string - 方块类型 (如 oak_log, stone, diamond_ore)"}
+  },
+  "placeBlock": {
+    "name": "placeBlock",
+    "description": "在指定位置放置方块",
+    "parameters": {
+      "blockName": "string - 方块名称",
+      "x": "number", "y": "number", "z": "number"
+    }
+  },
+  "equipItem": {
+    "name": "equipItem",
+    "description": "装备物品到手上",
+    "parameters": {"itemName": "string - 物品名称 (如 diamond_sword)"}
+  },
+  "dropItem": {
+    "name": "dropItem",
+    "description": "丢弃物品",
+    "parameters": {
+      "itemName": "string - 物品名称",
+      "count": "number - 可选：丢弃数量（默认全部）"
+    }
+  },
+  "eat": {
+    "name": "eat",
+    "description": "吃东西恢复饥饿值",
+    "parameters": {
+      "foodName": "string - 可选：指定食物名称（不指定则自动选择）"
+    }
+  },
+  "useItem": {
+    "name": "useItem",
+    "description": "使用当前手持物品（如使用弓箭、喝药水、使用末影珍珠等）",
+    "parameters": {}
+  },
+  "activateBlock": {
+    "name": "activateBlock",
+    "description": "右键激活/交互方块（如打开门、按按钮、拉拉杆、使用床等）",
+    "parameters": {
+      "x": "number - X坐标",
+      "y": "number - Y坐标",
+      "z": "number - Z坐标"
+    }
+  },
+  "mountEntity": {
+    "name": "mountEntity",
+    "description": "骑乘实体（马、船、矿车、猪等）",
+    "parameters": {
+      "entityType": "string - 可选：实体类型（如 horse, boat, minecart）。不指定则骑乘最近的可骑乘实体"
+    }
+  },
+  "dismount": {
+    "name": "dismount",
+    "description": "从当前骑乘的实体上下来（下马、下船等）",
+    "parameters": {}
+  },
+  "useOnEntity": {
+    "name": "useOnEntity",
+    "description": "对实体使用物品/右键交互（喂动物、与村民交易、拴绳等）",
+    "parameters": {
+      "entityType": "string - 实体类型（如 cow, villager, pig）",
+      "hand": "string - 可选：使用哪只手（hand 或 off-hand，默认 hand）"
+    }
+  },
+  "viewInventory": {
+    "name": "viewInventory",
+    "description": "查看背包物品",
+    "parameters": {}
+  },
+  "findBlock": {
+    "name": "findBlock",
+    "description": "寻找最近的指定方块",
+    "parameters": {
+      "blockType": "string - 方块名称",
+      "maxDistance": "number - 最大距离（默认32）"
+    }
+  },
+  "scanEntities": {
+    "name": "scanEntities",
+    "description": "扫描周围实体",
+    "parameters": {
+      "range": "number - 范围（默认16）",
+      "entityType": "string - 可选：过滤类型"
+    }
+  },
+  "listPlayers": {
+    "name": "listPlayers",
+    "description": "获取服务器上所有在线玩家列表（包含玩家昵称、位置、距离等信息）",
+    "parameters": {}
+  },
+  "executeScript": {
+    "name": "executeScript",
+    "description": "DYNAMIC",
+    "parameters": {
+      "script": "string - Python脚本代码",
+      "description": "string - 脚本描述",
+      "timeout": "number - 超时秒数（默认300）"
+    }
+  }
+}

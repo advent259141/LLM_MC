@@ -29,7 +29,9 @@ class Settings(BaseSettings):
     bot_ws_url: str = "ws://localhost:3001/ws"
     
     # Agent Configuration
-    agent_tick_rate: float = 2.0  # seconds between decisions
+    agent_tick_rate: float = 2.0  # 空闲时的决策间隔（秒）
+    agent_task_tick_rate: float = 15.0  # 有后台任务时的决策间隔（秒），0 表示完全事件驱动
+    auto_start_agent: bool = True  # 是否自动启动 Agent
     
     # Server Configuration
     host: str = "0.0.0.0"

@@ -17,6 +17,9 @@ class BotClient:
         self.ws_connection = None
         self.event_handlers: List[Callable] = []
         self._ws_task: Optional[asyncio.Task] = None
+        
+        # 事件等待器：用于等待特定事件
+        self._event_waiters: List[Dict[str, Any]] = []
     
     async def init(self):
         """Initialize the HTTP client"""
@@ -119,6 +122,10 @@ class BotClient:
     
     async def _handle_event(self, event: Dict[str, Any]):
         """Handle incoming WebSocket event"""
+        # 首先检查事件等待器
+        await self._check_event_waiters(event)
+        
+        # 然后调用普通事件处理器
         for handler in self.event_handlers:
             try:
                 if asyncio.iscoroutinefunction(handler):
@@ -127,6 +134,86 @@ class BotClient:
                     handler(event)
             except Exception as e:
                 print(f"[BotClient] Event handler error: {e}")
+    
+    async def _check_event_waiters(self, event: Dict[str, Any]):
+        """检查并触发匹配的事件等待器"""
+        event_type = event.get("type")
+        
+        # 遍历所有等待器
+        waiters_to_remove = []
+        for waiter in self._event_waiters:
+            # 检查事件类型是否匹配
+            if waiter["event_type"] != event_type:
+                continue
+            
+            # 如果有过滤器，检查是否匹配
+            filter_func = waiter.get("filter")
+            if filter_func:
+                try:
+                    if not filter_func(event):
+                        continue
+                except Exception as e:
+                    print(f"[BotClient] Event filter error: {e}")
+                    continue
+            
+            # 匹配成功，设置结果
+            waiter["future"].set_result(event)
+            waiters_to_remove.append(waiter)
+        
+        # 移除已触发的等待器
+        for waiter in waiters_to_remove:
+            self._event_waiters.remove(waiter)
+    
+    async def wait_for_event(
+        self,
+        event_type: str,
+        filter_func: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        timeout: float = 30.0
+    ) -> Optional[Dict[str, Any]]:
+        """
+        等待特定类型的事件
+        
+        Args:
+            event_type: 事件类型（如 'playerCollect', 'chat', 'death' 等）
+            filter_func: 可选的过滤函数，返回 True 表示匹配
+            timeout: 超时时间（秒），默认 30 秒
+            
+        Returns:
+            匹配的事件数据，超时返回 None
+            
+        Example:
+            # 等待某个玩家捡起物品
+            event = await bot_client.wait_for_event(
+                "playerCollect",
+                filter_func=lambda e: e.get("collector", {}).get("name") == "Steve",
+                timeout=10.0
+            )
+        """
+        future = asyncio.get_event_loop().create_future()
+        
+        waiter = {
+            "event_type": event_type,
+            "filter": filter_func,
+            "future": future
+        }
+        
+        self._event_waiters.append(waiter)
+        
+        try:
+            result = await asyncio.wait_for(future, timeout=timeout)
+            return result
+        except asyncio.TimeoutError:
+            # 超时，移除等待器
+            if waiter in self._event_waiters:
+                self._event_waiters.remove(waiter)
+            return None
+    
+    def cancel_all_waiters(self):
+        """取消所有事件等待器"""
+        for waiter in self._event_waiters:
+            if not waiter["future"].done():
+                waiter["future"].cancel()
+        self._event_waiters.clear()
 
 
 # Singleton instance
